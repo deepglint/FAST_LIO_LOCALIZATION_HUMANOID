@@ -94,7 +94,7 @@ namespace pcd_tools
         {
             PcdPair pair_;
             pair_.voxel_size_ = voxel_size * scale[scale_i];
-            pair_.icp_threshold_ = pair_.voxel_size_ * 1.5;
+            pair_.icp_threshold_ = pair_.voxel_size_ * 1.3;
             vec_pcd_pair.push_back(pair_);
         }
 

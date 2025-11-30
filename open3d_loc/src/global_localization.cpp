@@ -1,20 +1,20 @@
-#include <iostream>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp/wait_for_message.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <tf2_ros/transform_broadcaster.hpp>
+#include <tf2_ros/transform_listener.hpp>
+#include <tf2_ros/buffer.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/static_transform_broadcaster.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/float32.hpp>
+
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <queue>
-#include <thread>
-#include <mutex>
-
-#include <ros/ros.h>
-#include <nav_msgs/Odometry.h>
-#include <tf/transform_broadcaster.h>
-#include <tf/transform_listener.h>
-#include <geometry_msgs/TransformStamped.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <tf2_ros/static_transform_broadcaster.h>
-#include <geometry_msgs/PoseWithCovarianceStamped.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <std_msgs/Float32.h>
-
-#include <eigen_conversions/eigen_msg.h>
+#include <cmath>
 // #include <pcl/common/transforms.h>
 
 #include <Eigen/Core>
@@ -29,7 +29,8 @@
 class KalmanFilter
 {
 public:
-    KalmanFilter()
+    KalmanFilter() : processVar_(0.0), estimatedMeasVar_(0.0),
+                     posteriEstimate_(0.0), posteriErrorEstimate_(1.0)
     {
     }
 
@@ -45,7 +46,18 @@ public:
         double prioriEstimate = posteriEstimate_;
         double prioriErrorEstimate = posteriErrorEstimate_ + processVar_;
 
-        double blendingFactor = prioriErrorEstimate / (prioriErrorEstimate + estimatedMeasVar_);
+        double denominator = prioriErrorEstimate + estimatedMeasVar_;
+
+        // 防止除零导致 NaN
+        if (std::abs(denominator) < 1e-10)
+        {
+            // 如果分母接近零，直接使用测量值
+            posteriEstimate_ = measurement;
+            posteriErrorEstimate_ = 1.0;
+            return;
+        }
+
+        double blendingFactor = prioriErrorEstimate / denominator;
         posteriEstimate_ = prioriEstimate + blendingFactor * (measurement - prioriEstimate);
         posteriErrorEstimate_ = (1 - blendingFactor) * prioriErrorEstimate;
     }
@@ -62,24 +74,24 @@ private:
     double posteriErrorEstimate_;
 };
 
-class GloabalLocalization
+class GloabalLocalization : public rclcpp::Node
 {
 private:
     /* data */
 public:
-    GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &nh_private);
+    GloabalLocalization();
     ~GloabalLocalization();
 
     /// @brief 初始化定位
     void LocalizationInitialize();
 
     /// @brief 订阅fast_lio里程计信息
-    void CallbackBaselink2Odom(const nav_msgs::Odometry::ConstPtr &baselink2odom);
+    void CallbackBaselink2Odom(const nav_msgs::msg::Odometry::SharedPtr baselink2odom);
     /// @brief 订阅在baselink下的点云
-    void CallbackScan(const sensor_msgs::PointCloud2::ConstPtr &scan_in_baselink);
+    void CallbackScan(const sensor_msgs::msg::PointCloud2::SharedPtr scan_in_baselink);
 
     /// @brief 订阅在初始位姿
-    void CallbackInitialPose(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr &initialpose);
+    void CallbackInitialPose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr initialpose);
 
     void StartLoc();
 
@@ -105,20 +117,17 @@ public:
     double ComputeMotionDis(const Eigen::Vector3d &a, const Eigen::Vector3d &b);
 
 private:
-    ros::NodeHandle nh_;
-    ros::NodeHandle nh_private_;
-
     /// @brief 订阅baselink2odom,即fast_lio的里程计信息
-    ros::Subscriber sub_baselink2odom_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_baselink2odom_;
 
     /// @brief 订阅当前帧点云
-    ros::Subscriber sub_scan_cur_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_scan_cur_;
 
     /// @brief 订阅初始位姿
-    ros::Subscriber sub_initialpose_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_initialpose_;
 
     /// @brief baselink到odom的pose表达
-    nav_msgs::Odometry pose_baselink2odom_;
+    nav_msgs::msg::Odometry pose_baselink2odom_;
 
     /// @brief bselink到odom的变换矩阵表达
     Eigen::Matrix4d mat_baselink2odom_;
@@ -139,7 +148,7 @@ private:
     Eigen::Matrix4d mat_imulink2baselink_;
 
     /// @brief 初始位姿, x, y, z, roll, pitch, yaw (单位:度degrees)
-    std::vector<float> initialpose_;
+    std::vector<double> initialpose_;
 
     /// @brief 原始地图点云
     std::shared_ptr<open3d::geometry::PointCloud> pcd_map_ori_;
@@ -163,27 +172,28 @@ private:
     std::mutex lock_exit_;
     bool flag_exit_;
 
-    ros::Publisher pub_baselink2map_;
-    ros::Publisher pub_baselink2map_kalman_;
-    ros::Publisher pub_motionlink2map_;
-    ros::Publisher pub_odom2map_;
-    ros::Publisher pub_odom2map_kalman_;
-    ros::Time timestamp_odom_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_baselink2map_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_baselink2map_kalman_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_motionlink2map_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom2map_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom2map_kalman_;
+    rclcpp::Time timestamp_odom_;
     std::mutex lock_timestamp_;
 
-    ros::Publisher pub_map_;
-    ros::Publisher pub_scan_;
-    ros::Publisher pub_scan2map_;
-    ros::Publisher pub_submap_;
-    ros::Publisher pub_localization_3d_;
-    ros::Publisher pub_localization_3d_confidence_;
-    ros::Publisher pub_localization_3d_delay_ms_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_map_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_scan_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_scan2map_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_submap_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_localization_3d_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_localization_3d_confidence_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_localization_3d_delay_ms_;
 
-    geometry_msgs::PoseStamped localization_3d_;
-    std_msgs::Float32 localization_3d_confidence_;
-    std_msgs::Float32 localization_3d_delay_ms_;
+    geometry_msgs::msg::PoseStamped localization_3d_;
+    std_msgs::msg::Float32 localization_3d_confidence_;
+    std_msgs::msg::Float32 localization_3d_delay_ms_;
 
-    tf2_ros::StaticTransformBroadcaster static_broadcaster_;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> br_odom2map_;
+    std::shared_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
 
     bool save_scan_;
 
@@ -211,9 +221,9 @@ private:
     KalmanFilter kalman_filter_odom2map_;
 
     // 0:kf_processVar 1:kf_estimatedMeasVar
-    std::vector<float> kf_param_x_;
-    std::vector<float> kf_param_y_;
-    std::vector<float> kf_param_z_;
+    std::vector<double> kf_param_x_;
+    std::vector<double> kf_param_y_;
+    std::vector<double> kf_param_z_;
 
     /// @brief 对odom2map进行kalman滤波
     bool filter_odom2map_ = false;
@@ -226,10 +236,14 @@ private:
     // Eigen::Vector3d cur_loc_;
     /// @brief 更新地图子图的距离,超过则更新地图子图
     double dis_updatemap_;
+
+    tf2_ros::Buffer tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 };
 
-GloabalLocalization::GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &nh_private) : nh_(nh),
-                                                                                             nh_private_(nh_private)
+GloabalLocalization::GloabalLocalization() : Node("global_loc_node"),
+                                             tf_buffer_(this->get_clock()),
+                                             tf_listener_(std::make_shared<tf2_ros::TransformListener>(tf_buffer_))
 {
     flag_exit_ = false;
     loc_initialized_ = false;
@@ -245,70 +259,107 @@ GloabalLocalization::GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &n
     pcd_map_fine_.reset(new open3d::geometry::PointCloud);
     queue_maxsize_ = 5;
 
-    pub_baselink2map_ = nh.advertise<nav_msgs::Odometry>("/baselink2map", 100000);
-    pub_baselink2map_kalman_ = nh.advertise<nav_msgs::Odometry>("/baselink2map_kalman", 100000);
-    pub_motionlink2map_ = nh.advertise<nav_msgs::Odometry>("/motionlink2map", 100000);
-    pub_odom2map_ = nh.advertise<nav_msgs::Odometry>("/odom2map", 100000);
-    pub_odom2map_kalman_ = nh.advertise<nav_msgs::Odometry>("/odom2map_kalman", 100000);
+    pub_baselink2map_ = this->create_publisher<nav_msgs::msg::Odometry>("/baselink2map", 100000);
+    pub_baselink2map_kalman_ = this->create_publisher<nav_msgs::msg::Odometry>("/baselink2map_kalman", 100000);
+    pub_motionlink2map_ = this->create_publisher<nav_msgs::msg::Odometry>("/motionlink2map", 100000);
+    pub_odom2map_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom2map", 100000);
+    pub_odom2map_kalman_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom2map_kalman", 100000);
 
-    pub_map_ = nh.advertise<sensor_msgs::PointCloud2>("/map", 1, true);
-    pub_submap_ = nh.advertise<sensor_msgs::PointCloud2>("/submap", 1, true);
-    pub_scan2map_ = nh.advertise<sensor_msgs::PointCloud2>("/scan2map", 1, true);
-    pub_scan_ = nh.advertise<sensor_msgs::PointCloud2>("/scan", 1, true);
-    pub_localization_3d_ = nh.advertise<geometry_msgs::PoseStamped>("/localization_3d", 1, false);
-    pub_localization_3d_confidence_ = nh.advertise<std_msgs::Float32>("/localization_3d_confidence", 1, false);
-    pub_localization_3d_delay_ms_ = nh.advertise<std_msgs::Float32>("/localization_3d_delay_ms", 1, false);
+    pub_map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/map", 1);
+    pub_submap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/submap", 1);
+    pub_scan2map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/scan2map", 1);
+    pub_scan_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/scan", 1);
+    pub_localization_3d_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/localization_3d", 1);
+    pub_localization_3d_confidence_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_confidence", 1);
+    pub_localization_3d_delay_ms_ = this->create_publisher<std_msgs::msg::Float32>("/localization_3d_delay_ms", 1);
 
     loc_frequence_ = 2.0; //
     loc_fitness_ = 0.0;
     // 注册回调函数
-    sub_baselink2odom_ = nh_.subscribe("/Odometry_loc", 50, &GloabalLocalization::CallbackBaselink2Odom, this);
-    sub_scan_cur_ = nh_.subscribe("/cloud_registered_1", 50, &GloabalLocalization::CallbackScan, this);
-    sub_initialpose_ = nh_.subscribe("/initialpose", 50, &GloabalLocalization::CallbackInitialPose, this);
+    sub_baselink2odom_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        "/Odometry_loc", 50, std::bind(&GloabalLocalization::CallbackBaselink2Odom, this, std::placeholders::_1));
+    sub_scan_cur_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/cloud_registered_1", 50, std::bind(&GloabalLocalization::CallbackScan, this, std::placeholders::_1));
+    sub_initialpose_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+        "/initialpose", 50, std::bind(&GloabalLocalization::CallbackInitialPose, this, std::placeholders::_1));
 
-    pose_baselink2odom_ = nav_msgs::Odometry();
+    pose_baselink2odom_ = nav_msgs::msg::Odometry();
     pose_baselink2odom_.header.frame_id = "odom";
     pose_baselink2odom_.child_frame_id = "base_link";
     // geometry_msgs的Quaternion会被初始化为0,0,0,0,而不是正确的0,0,0,1
     pose_baselink2odom_.pose.pose.orientation.w = 1;
-    ROS_INFO("pose baselink2odom:\nx: %f, y: %f, z: %f, qx: %f, \
+    RCLCPP_INFO(this->get_logger(), "pose baselink2odom:\nx: %f, y: %f, z: %f, qx: %f, \
                             qy: %f, qz: %f, qw: %f",
-             pose_baselink2odom_.pose.pose.position.x,
-             pose_baselink2odom_.pose.pose.position.y,
-             pose_baselink2odom_.pose.pose.position.z,
-             pose_baselink2odom_.pose.pose.orientation.x,
-             pose_baselink2odom_.pose.pose.orientation.y,
-             pose_baselink2odom_.pose.pose.orientation.z,
-             pose_baselink2odom_.pose.pose.orientation.w);
+                pose_baselink2odom_.pose.pose.position.x,
+                pose_baselink2odom_.pose.pose.position.y,
+                pose_baselink2odom_.pose.pose.position.z,
+                pose_baselink2odom_.pose.pose.orientation.x,
+                pose_baselink2odom_.pose.pose.orientation.y,
+                pose_baselink2odom_.pose.pose.orientation.z,
+                pose_baselink2odom_.pose.pose.orientation.w);
 
     // 队列最大数量
-    nh_private_.param<int>("pcd_queue_maxsize", queue_maxsize_, 5);
-    nh_private_.param<bool>("save_scan", save_scan_, false);
+    this->declare_parameter<int>("pcd_queue_maxsize", 5);
+    this->declare_parameter<bool>("save_scan", false);
     /// 最大点数量限制
-    nh_private_.param<int>("maxpoints_source", maxpoints_source_, 50000);
-    nh_private_.param<int>("maxpoints_target", maxpoints_target_, 200000);
+    this->declare_parameter<int>("maxpoints_source", 50000);
+    this->declare_parameter<int>("maxpoints_target", 200000);
 
     // 定位间隔时间
-    nh_private_.param<double>("loc_frequence", loc_frequence_, 2.0);
+    this->declare_parameter<double>("loc_frequence", 2.0);
 
     /// 定位阈值
-    nh_private_.param<double>("confidence_loc_th", confidence_loc_th_, 0.6);
+    this->declare_parameter<double>("confidence_loc_th", 0.6);
 
     /// 卡尔曼参数
-    nh_private_.param<std::vector<float>>("kf_baselink2map/x", kf_param_x_, std::vector<float>(2));
-    nh_private_.param<std::vector<float>>("kf_baselink2map/y", kf_param_y_, std::vector<float>(2));
-    nh_private_.param<std::vector<float>>("kf_baselink2map/z", kf_param_z_, std::vector<float>(2));
+    this->declare_parameter<std::vector<double>>("kf_baselink2map/x", std::vector<double>(2));
+    this->declare_parameter<std::vector<double>>("kf_baselink2map/y", std::vector<double>(2));
+    this->declare_parameter<std::vector<double>>("kf_baselink2map/z", std::vector<double>(2));
 
-    nh_private_.param<bool>("filter_odom2map", filter_odom2map_, false);
-    nh_private_.param<double>("kalman_processVar2", kalman_processVar2_, 0.02);
-    nh_private_.param<double>("kalman_estimatedMeasVar2", kalman_estimatedMeasVar2_, 0.04);
+    this->declare_parameter<bool>("filter_odom2map", false);
+    this->declare_parameter<double>("kalman_processVar2", 0.02);
+    this->declare_parameter<double>("kalman_estimatedMeasVar2", 0.04);
     // voxelsize
-    nh_private_.param<double>("voxelsize_coarse", voxelsize_coarse_, 0.2);
-    nh_private_.param<double>("voxelsize_fine", voxelsize_fine_, 0.05);
-    nh_private_.param<double>("threshold_fitness_init", threshold_fitness_init_, 0.9);
-    nh_private_.param<double>("threshold_fitness", threshold_fitness_, 0.9);
-    nh_private_.param<std::vector<float>>("initialpose", initialpose_, std::vector<float>());
-    nh_private_.param<double>("dis_updatemap", dis_updatemap_, 5);
+    this->declare_parameter<double>("voxelsize_coarse", 0.2);
+    this->declare_parameter<double>("voxelsize_fine", 0.05);
+    this->declare_parameter<double>("threshold_fitness_init", 0.9);
+    this->declare_parameter<double>("threshold_fitness", 0.9);
+    this->declare_parameter<std::vector<double>>("initialpose", std::vector<double>());
+    this->declare_parameter<double>("dis_updatemap", 1);
+
+    this->get_parameter("pcd_queue_maxsize", queue_maxsize_);
+    this->get_parameter("save_scan", save_scan_);
+    this->get_parameter("maxpoints_source", maxpoints_source_);
+    this->get_parameter("maxpoints_target", maxpoints_target_);
+    this->get_parameter("loc_frequence", loc_frequence_);
+    this->get_parameter("confidence_loc_th", confidence_loc_th_);
+    this->get_parameter("kf_baselink2map/x", kf_param_x_);
+    this->get_parameter("kf_baselink2map/y", kf_param_y_);
+    this->get_parameter("kf_baselink2map/z", kf_param_z_);
+    this->get_parameter("filter_odom2map", filter_odom2map_);
+    this->get_parameter("kalman_processVar2", kalman_processVar2_);
+    this->get_parameter("kalman_estimatedMeasVar2", kalman_estimatedMeasVar2_);
+
+    RCLCPP_INFO(this->get_logger(), "Kalman filter parameters:");
+    RCLCPP_INFO(this->get_logger(), "  kf_x: [%.6f, %.6f], size: %zu",
+                kf_param_x_.size() >= 1 ? kf_param_x_[0] : 0.0,
+                kf_param_x_.size() >= 2 ? kf_param_x_[1] : 0.0,
+                kf_param_x_.size());
+    RCLCPP_INFO(this->get_logger(), "  kf_y: [%.6f, %.6f], size: %zu",
+                kf_param_y_.size() >= 1 ? kf_param_y_[0] : 0.0,
+                kf_param_y_.size() >= 2 ? kf_param_y_[1] : 0.0,
+                kf_param_y_.size());
+    RCLCPP_INFO(this->get_logger(), "  kf_z: [%.6f, %.6f], size: %zu",
+                kf_param_z_.size() >= 1 ? kf_param_z_[0] : 0.0,
+                kf_param_z_.size() >= 2 ? kf_param_z_[1] : 0.0,
+                kf_param_z_.size());
+    RCLCPP_INFO(this->get_logger(), "  filter_odom2map: %s", filter_odom2map_ ? "true" : "false");
+    this->get_parameter("voxelsize_coarse", voxelsize_coarse_);
+    this->get_parameter("voxelsize_fine", voxelsize_fine_);
+    this->get_parameter("threshold_fitness_init", threshold_fitness_init_);
+    this->get_parameter("threshold_fitness", threshold_fitness_);
+    this->get_parameter("initialpose", initialpose_);
+    this->get_parameter("dis_updatemap", dis_updatemap_);
 
     for (auto i : initialpose_)
     {
@@ -320,28 +371,33 @@ GloabalLocalization::GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &n
 
     // 读取地图
     std::string path_map = "";
-    nh_private_.param<std::string>("path_map", path_map, "");
+    this->declare_parameter<std::string>("path_map", "");
+    this->get_parameter("path_map", path_map);
     open3d::io::ReadPointCloud(path_map, *pcd_map_ori_);
     if (pcd_map_ori_ == nullptr || pcd_map_ori_->IsEmpty())
     {
-        ROS_ERROR("read map from path: %s failed", path_map.c_str());
-        ros::shutdown();
+        RCLCPP_ERROR(this->get_logger(), "read map from path: %s failed", path_map.c_str());
+        rclcpp::shutdown();
     }
-    pcd_map_ori_->PaintUniformColor({1, 0, 0});
+
+    if (!pcd_map_ori_->HasColors())
+    {
+        pcd_map_ori_->PaintUniformColor({1, 0, 0});
+    }
+    // pcd_map_ori_->PaintUniformColor({1, 0, 0});
 
     pcd_map_coarse_ = pcd_map_ori_->VoxelDownSample(voxelsize_coarse_);
     pcd_map_coarse_->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_coarse_ * 2, 30));
 
     /// publish map, 用粗地图可视化，减少资源占用
-    sensor_msgs::PointCloud2 pc2_map;
+    sensor_msgs::msg::PointCloud2 pc2_map;
     open3d_conversions::open3dToRos(*pcd_map_coarse_, pc2_map);
     pc2_map.header.frame_id = "map";
-    pc2_map.header.stamp = ros::Time::now();
-    pub_map_.publish(pc2_map);
+    pc2_map.header.stamp = this->now();
+    pub_map_->publish(pc2_map);
 
     pcd_map_fine_ = pcd_map_ori_->VoxelDownSample(voxelsize_fine_);
     pcd_map_fine_->EstimateNormals(open3d::geometry::KDTreeSearchParamHybrid(voxelsize_fine_ * 2, 30));
-
 
     GetTfTransformToMatrix("base_link", "imu_link", mat_imulink2baselink_);
     std::cout << "mat_imulink2baselink_:\n"
@@ -350,7 +406,13 @@ GloabalLocalization::GloabalLocalization(ros::NodeHandle &nh, ros::NodeHandle &n
     GetTfTransformToMatrix("motion_link", "base_link", mat_baselink2motionlink_);
     std::cout << "mat_baselink2motionlink_:\n"
               << mat_baselink2motionlink_ << std::endl;
-    ROS_WARN("initialize finished");
+
+    RCLCPP_WARN(this->get_logger(), "initialize finished");
+
+    br_odom2map_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    static_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+
+    StartLoc();
 }
 
 GloabalLocalization::~GloabalLocalization()
@@ -374,26 +436,24 @@ Eigen::Matrix3d GloabalLocalization::Euler2Matrix3d(const Eigen::Vector3d euler)
 bool GloabalLocalization::GetTfTransformToMatrix(std::string frame_id, std::string child_frame_id, Eigen::Matrix4d &matrix)
 {
     // 获取pose
-    tf::StampedTransform pose_;
-    tf::TransformListener tf_listener_;
+    geometry_msgs::msg::TransformStamped pose_;
     try
     {
-        tf_listener_.waitForTransform(frame_id, child_frame_id, ros::Time(0), ros::Duration(3));
-        tf_listener_.lookupTransform(frame_id, child_frame_id, ros::Time(0), pose_);
+        pose_ = tf_buffer_.lookupTransform(frame_id, child_frame_id, rclcpp::Time(0));
     }
-    catch (tf::TransformException &e)
+    catch (tf2::TransformException &e)
     {
-        ROS_ERROR("[GetTransformMatrix]: %s", e.what());
+        RCLCPP_ERROR(this->get_logger(), "[GetTransformMatrix]: %s", e.what());
         return false;
     }
 
-    Eigen::Vector3d translation = Eigen::Vector3d(pose_.getOrigin().x(), pose_.getOrigin().y(), pose_.getOrigin().z());
+    Eigen::Vector3d translation = Eigen::Vector3d(pose_.transform.translation.x, pose_.transform.translation.y, pose_.transform.translation.z);
     Eigen::Quaterniond quat = Eigen::Quaterniond::Identity();
 
-    quat = Eigen::Quaterniond(pose_.getRotation().w(),
-                              pose_.getRotation().x(),
-                              pose_.getRotation().y(),
-                              pose_.getRotation().z());
+    quat = Eigen::Quaterniond(pose_.transform.rotation.w,
+                              pose_.transform.rotation.x,
+                              pose_.transform.rotation.y,
+                              pose_.transform.rotation.z);
     Eigen::Matrix3d rotation = quat.matrix();
 
     matrix = Eigen::Matrix4d::Identity();
@@ -402,15 +462,14 @@ bool GloabalLocalization::GetTfTransformToMatrix(std::string frame_id, std::stri
     return true;
 }
 
-void GloabalLocalization::CallbackBaselink2Odom(
-    const nav_msgs::Odometry::ConstPtr &baselink2odom)
+void GloabalLocalization::CallbackBaselink2Odom(const nav_msgs::msg::Odometry::SharedPtr baselink2odom)
 {
     auto odom_cbk_s = std::chrono::high_resolution_clock::now();
     lock_timestamp_.lock();
     timestamp_odom_ = baselink2odom->header.stamp;
     lock_timestamp_.unlock();
     Eigen::Isometry3d mat_current = Eigen::Isometry3d::Identity();
-    tf::poseMsgToEigen(baselink2odom->pose.pose, mat_current);
+    tf2::fromMsg(baselink2odom->pose.pose, mat_current);
     auto mat_imulink2odom = mat_current.matrix();
 
     mat_baselink2odom_ = mat_imulink2odom * mat_imulink2baselink_.inverse();
@@ -418,37 +477,34 @@ void GloabalLocalization::CallbackBaselink2Odom(
     Eigen::Isometry3d Isometry3d_baselink2map;
     mat_baselink2map_ = mat_odom2map_ * mat_baselink2odom_;
     Isometry3d_baselink2map.matrix() = mat_baselink2map_;
-    nav_msgs::Odometry baselink2map;
-    tf::poseEigenToMsg(Isometry3d_baselink2map, baselink2map.pose.pose);
+    nav_msgs::msg::Odometry baselink2map;
+    baselink2map.pose.pose = tf2::toMsg(Isometry3d_baselink2map);
     baselink2map.header.frame_id = "map";
     baselink2map.child_frame_id = "base_link";
     baselink2map.header.stamp = baselink2odom->header.stamp;
-    pub_baselink2map_.publish(baselink2map);
+    pub_baselink2map_->publish(baselink2map);
 
     Eigen::Isometry3d Isometry3d_odom2map;
     Isometry3d_odom2map.matrix() = mat_odom2map_;
-    nav_msgs::Odometry odom2map;
-    tf::poseEigenToMsg(Isometry3d_odom2map, odom2map.pose.pose);
+    nav_msgs::msg::Odometry odom2map;
+    odom2map.pose.pose = tf2::toMsg(Isometry3d_odom2map);
     odom2map.header.frame_id = "map";
     odom2map.child_frame_id = "odom";
     odom2map.header.stamp = baselink2odom->header.stamp;
-    pub_odom2map_.publish(odom2map);
+    pub_odom2map_->publish(odom2map);
 
     /// 发布tf关系
-    static tf::TransformBroadcaster br_odom2map;
-    tf::Transform transform_odom2map;
-    tf::Quaternion q_odom2map;
-    transform_odom2map.setOrigin(tf::Vector3(odom2map.pose.pose.position.x,
-                                             odom2map.pose.pose.position.y,
-                                             odom2map.pose.pose.position.z));
-    q_odom2map.setW(odom2map.pose.pose.orientation.w);
-    q_odom2map.setX(odom2map.pose.pose.orientation.x);
-    q_odom2map.setY(odom2map.pose.pose.orientation.y);
-    q_odom2map.setZ(odom2map.pose.pose.orientation.z);
-    transform_odom2map.setRotation(q_odom2map);
-    br_odom2map.sendTransform(tf::StampedTransform(transform_odom2map, baselink2odom->header.stamp, "map", "odom")); /// odom就是camera_init
+    geometry_msgs::msg::TransformStamped transform_odom2map;
+    transform_odom2map.header.frame_id = "map";
+    transform_odom2map.child_frame_id = "odom";
+    transform_odom2map.header.stamp = baselink2odom->header.stamp;
+    transform_odom2map.transform.translation.x = odom2map.pose.pose.position.x;
+    transform_odom2map.transform.translation.y = odom2map.pose.pose.position.y;
+    transform_odom2map.transform.translation.z = odom2map.pose.pose.position.z;
+    transform_odom2map.transform.rotation = odom2map.pose.pose.orientation;
+    br_odom2map_->sendTransform(transform_odom2map);
 
-    /// 卡尔曼滤波
+    /// 卡尔曼滤波 - 只在定位初始化完成后执行
     if (loc_initialized_)
     {
         Eigen::Matrix4d mat_baselink2map_kalman = Eigen::Matrix4d::Identity();
@@ -457,79 +513,95 @@ void GloabalLocalization::CallbackBaselink2Odom(
         {
             Eigen::Isometry3d Isometry3d_odom2map_kalman;
             Isometry3d_odom2map_kalman.matrix() = mat_odom2map_kalman_;
-            nav_msgs::Odometry odom2map_kalman;
-            tf::poseEigenToMsg(Isometry3d_odom2map_kalman, odom2map_kalman.pose.pose);
+            nav_msgs::msg::Odometry odom2map_kalman;
+            odom2map_kalman.pose.pose = tf2::toMsg(Isometry3d_odom2map_kalman);
             odom2map_kalman.header.frame_id = "map";
             odom2map_kalman.child_frame_id = "odom_kalman";
             odom2map_kalman.header.stamp = baselink2odom->header.stamp;
-            pub_odom2map_kalman_.publish(odom2map_kalman);
+            pub_odom2map_kalman_->publish(odom2map_kalman);
 
             kf_baselink_z_.inputLatestNoisyMeasurement((mat_odom2map_kalman_ * mat_baselink2odom_)(2, 3));
             mat_baselink2map_kalman = mat_odom2map_kalman_ * mat_baselink2odom_;
         }
         else
         {
-            kf_baselink_x_.inputLatestNoisyMeasurement((mat_baselink2map_)(0, 3));
-            kf_baselink_y_.inputLatestNoisyMeasurement((mat_baselink2map_)(1, 3));
-            kf_baselink_z_.inputLatestNoisyMeasurement((mat_baselink2map_)(2, 3));
+            double input_x = mat_baselink2map_(0, 3);
+            double input_y = mat_baselink2map_(1, 3);
+            double input_z = mat_baselink2map_(2, 3);
+
+            kf_baselink_x_.inputLatestNoisyMeasurement(input_x);
+            kf_baselink_y_.inputLatestNoisyMeasurement(input_y);
+            kf_baselink_z_.inputLatestNoisyMeasurement(input_z);
             mat_baselink2map_kalman = mat_baselink2map_;
+
+            RCLCPP_DEBUG(this->get_logger(), "KF input: x=%.3f, y=%.3f, z=%.3f", input_x, input_y, input_z);
         }
 
-        mat_baselink2map_kalman(2, 3) = kf_baselink_z_.getLatestEstimatedMeasurement();
-        Eigen::Isometry3d Isometry3d_baselink2map_kalman;
+        double filtered_z = kf_baselink_z_.getLatestEstimatedMeasurement();
 
+        // 验证结果是否有效（检查 NaN）
+        if (std::isnan(filtered_z))
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                 "Kalman filter returned NaN (input was: %.3f), using unfiltered value",
+                                 mat_baselink2map_kalman(2, 3));
+            mat_baselink2map_kalman(2, 3) = mat_baselink2map_(2, 3);
+        }
+        else
+        {
+            mat_baselink2map_kalman(2, 3) = filtered_z;
+        }
+        Eigen::Isometry3d Isometry3d_baselink2map_kalman;
         Isometry3d_baselink2map_kalman.matrix() = mat_baselink2map_kalman;
-        nav_msgs::Odometry baselink2map_kalman;
-        tf::poseEigenToMsg(Isometry3d_baselink2map_kalman, baselink2map_kalman.pose.pose);
+        nav_msgs::msg::Odometry baselink2map_kalman;
+        baselink2map_kalman.pose.pose = tf2::toMsg(Isometry3d_baselink2map_kalman);
         baselink2map_kalman.header.frame_id = "map";
         // baselink2map_kalman.child_frame_id = "base_link_kalman";
         baselink2map_kalman.header.stamp = baselink2odom->header.stamp;
-        pub_baselink2map_kalman_.publish(baselink2map_kalman);
+        pub_baselink2map_kalman_->publish(baselink2map_kalman);
 
         Eigen::Matrix4d mat_motionlink2map = mat_baselink2map_kalman * mat_baselink2motionlink_.inverse();
         Eigen::Isometry3d Isometry3d_motionlink2map;
         Isometry3d_motionlink2map.matrix() = mat_motionlink2map;
-        nav_msgs::Odometry motionlink2map;
-        tf::poseEigenToMsg(Isometry3d_motionlink2map, motionlink2map.pose.pose);
+        nav_msgs::msg::Odometry motionlink2map;
+        motionlink2map.pose.pose = tf2::toMsg(Isometry3d_motionlink2map);
         motionlink2map.header.frame_id = "map";
         // baselink2map_kalman.child_frame_id = "base_link_kalman";
         motionlink2map.header.stamp = baselink2odom->header.stamp;
-        pub_motionlink2map_.publish(motionlink2map);
+        pub_motionlink2map_->publish(motionlink2map);
 
         /// 发布tf关系
-        static tf::TransformBroadcaster br;
-        tf::Transform transform;
-        tf::Quaternion q;
-        transform.setOrigin(tf::Vector3(motionlink2map.pose.pose.position.x,
-                                        motionlink2map.pose.pose.position.y,
-                                        motionlink2map.pose.pose.position.z));
-        q.setW(motionlink2map.pose.pose.orientation.w);
-        q.setX(motionlink2map.pose.pose.orientation.x);
-        q.setY(motionlink2map.pose.pose.orientation.y);
-        q.setZ(motionlink2map.pose.pose.orientation.z);
-        transform.setRotation(q);
-        br.sendTransform(tf::StampedTransform(transform, baselink2odom->header.stamp, "map", "motion_link"));
+        geometry_msgs::msg::TransformStamped transform;
+        transform.header.frame_id = "map";
+        transform.child_frame_id = "motion_link";
+        transform.header.stamp = baselink2odom->header.stamp;
+        transform.transform.translation.x = motionlink2map.pose.pose.position.x;
+        transform.transform.translation.y = motionlink2map.pose.pose.position.y;
+        transform.transform.translation.z = motionlink2map.pose.pose.position.z;
+        transform.transform.rotation = motionlink2map.pose.pose.orientation;
+        br_odom2map_->sendTransform(transform);
 
         localization_3d_confidence_.data = loc_fitness_;
-        pub_localization_3d_confidence_.publish(localization_3d_confidence_);
-        localization_3d_delay_ms_.data = (ros::Time::now().toSec() - baselink2odom->header.stamp.toSec()) * 1000.0;
-        pub_localization_3d_delay_ms_.publish(localization_3d_delay_ms_);
+        pub_localization_3d_confidence_->publish(localization_3d_confidence_);
+        localization_3d_delay_ms_.data = (this->now() - baselink2odom->header.stamp).seconds() * 1000.0;
+        pub_localization_3d_delay_ms_->publish(localization_3d_delay_ms_);
         localization_3d_.header.frame_id = "map";
         localization_3d_.header.stamp = baselink2odom->header.stamp;
         localization_3d_.pose = motionlink2map.pose.pose;
-        pub_localization_3d_.publish(localization_3d_);
+        pub_localization_3d_->publish(localization_3d_);
     }
 }
 void GloabalLocalization::CallbackScan(
-    const sensor_msgs::PointCloud2::ConstPtr &scan_in_baselink)
+    const sensor_msgs::msg::PointCloud2::SharedPtr scan_in_baselink)
 {
     auto cbk_s = std::chrono::high_resolution_clock::now();
     open3d::geometry::PointCloud pcd_recieved;
     // 单帧转换为open3d，几百us
-    open3d_conversions::rosToOpen3d(scan_in_baselink, pcd_recieved);
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr const_scan_ptr = scan_in_baselink;
+    open3d_conversions::rosToOpen3d(const_scan_ptr, pcd_recieved);
     // 入队列
     // pcd_recieved
-    if (que_pcd_scan_.size() >= queue_maxsize_)
+    if (que_pcd_scan_.size() >= static_cast<size_t>(queue_maxsize_))
     {
         std::queue<open3d::geometry::PointCloud> que_temp;
         lock_scan_.lock();
@@ -587,14 +659,13 @@ void GloabalLocalization::LocalizationInitialize()
     double fitness_initial; /// overlap
     double loc_cost = 0;    /// 定位耗时(ms)
     int count_success = 0;
-    while (1)
+    while (rclcpp::ok())
     {
         auto loc_s = std::chrono::high_resolution_clock::now(); /// 开始定位计时
         lock_scan_.lock();
         if (pcd_scan_cur_->IsEmpty())
         {
             lock_scan_.unlock();
-            open3d::utility::LogInfo("wait for pcd_scan_cur_");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
@@ -622,7 +693,7 @@ void GloabalLocalization::LocalizationInitialize()
 
             *target = *map_fine_crop;
             open3d::utility::LogInfo("before sample, target size: {}, has normal: {}", target->points_.size(), target->HasNormals() ? "true" : "false");
-            if (target->points_.size() > maxpoints_target_)
+            if (target->points_.size() > static_cast<size_t>(maxpoints_target_))
             {
                 target = target->RandomDownSample(double(maxpoints_target_) / target->points_.size());
             }
@@ -630,17 +701,17 @@ void GloabalLocalization::LocalizationInitialize()
 
             source = pcd_scan->Crop(*OBB_scan);
             open3d::utility::LogInfo("source size: {}, has normal: {}", source->points_.size(), source->HasNormals() ? "true" : "false");
-            if (source->points_.size() > maxpoints_source_)
+            if (source->points_.size() > static_cast<size_t>(maxpoints_source_))
             {
                 source = source->RandomDownSample(double(maxpoints_source_) / source->points_.size());
             }
-
             open3d::utility::LogInfo("source size: {}, has normal: {}", source->points_.size(), source->HasNormals() ? "true" : "false");
 
             source->Transform(reg_matrix);
             *pcd_scan2map = *source;
 
-            auto multiScale_reg_matrix = pcd_tools::RegistrationMultiScaleIcp(source, target, voxelsize_fine_, 1, {1, 4, 6});
+            // auto multiScale_reg_matrix = pcd_tools::RegistrationMultiScaleIcp(source, target, voxelsize_fine_, 1, {1, 2, 4});
+            auto multiScale_reg_matrix = pcd_tools::RegistrationMultiScaleIcp(source, target, voxelsize_fine_, 1, {1, 2, 3});
             reg_matrix = multiScale_reg_matrix * reg_matrix;
             source->Transform(multiScale_reg_matrix);
             auto eva_result_coarse = open3d::pipelines::registration::EvaluateRegistration(*source, *target, voxelsize_fine_ * 3);
@@ -652,7 +723,7 @@ void GloabalLocalization::LocalizationInitialize()
             lock_mat_odom2map_.unlock();
             auto loc_e = std::chrono::high_resolution_clock::now(); /// 结束定位计时
             loc_cost = std::chrono::duration_cast<std::chrono::microseconds>(loc_e - loc_s).count() / 1000.0;
-            ROS_INFO("localization cost: %f ms", loc_cost);
+            RCLCPP_INFO(this->get_logger(), "localization cost: %f ms", loc_cost);
 
             if (fitness_initial > threshold_fitness_init_)
             {
@@ -670,27 +741,72 @@ void GloabalLocalization::LocalizationInitialize()
         }
     }
 
-
     open3d::utility::LogInfo("\n\n\nlocalization initialize success!!!!\n\n\n");
 }
 void GloabalLocalization::Localization()
 {
-    ROS_INFO("wait for Odometry_loc");
-    ros::topic::waitForMessage<nav_msgs::Odometry>("/Odometry_loc");
-    ROS_INFO("wait for cloud_registered_1");
-    ros::topic::waitForMessage<sensor_msgs::PointCloud2>("/cloud_registered_1");
+    RCLCPP_INFO(this->get_logger(), "wait for Odometry_loc");
+    // 等待接收到第一条里程计消息（通过检查timestamp是否有效）
+    while (rclcpp::ok() && timestamp_odom_.seconds() == 0.0)
+    {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Waiting for Odometry_loc...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    RCLCPP_INFO(this->get_logger(), "Received Odometry_loc");
+
+    RCLCPP_INFO(this->get_logger(), "wait for cloud_registered_1");
+    // 等待接收到第一条点云消息（通过检查pcd_scan_cur_是否为空）
+    while (rclcpp::ok())
+    {
+        lock_scan_.lock();
+        bool has_scan = !pcd_scan_cur_->IsEmpty();
+        lock_scan_.unlock();
+        if (has_scan)
+        {
+            break;
+        }
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Waiting for cloud_registered_1...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    RCLCPP_INFO(this->get_logger(), "Received cloud_registered_1");
+
     // initialize
     /****初始化定位****/
     mat_odom2map_ = mat_initialpose_; /// 初始位姿，从目前是从配置文件给
     LocalizationInitialize();
 
     /// 卡尔曼滤波初始化
-    kf_baselink_x_.KalmanFilterInit(kf_param_x_[0], kf_param_x_[1], mat_baselink2map_(0, 3), 1);
-    kf_baselink_y_.KalmanFilterInit(kf_param_y_[0], kf_param_y_[1], mat_baselink2map_(1, 3), 1);
-    kf_baselink_z_.KalmanFilterInit(kf_param_z_[0], kf_param_z_[1], mat_baselink2map_(2, 3), 1);
-    kalman_filter_odom2map_.KalmanFilterInit(kalman_processVar2_, kalman_estimatedMeasVar2_, mat_baselink2map_(2, 3), 1);
+    /// 使用当前 baselink2map 位置初始化卡尔曼滤波器
+    Eigen::Matrix4d init_baselink2map = mat_odom2map_ * mat_baselink2odom_;
+    double init_x = init_baselink2map(0, 3);
+    double init_y = init_baselink2map(1, 3);
+    double init_z = init_baselink2map(2, 3);
+
+    RCLCPP_INFO(this->get_logger(), "Initializing Kalman filters with position: x=%.3f, y=%.3f, z=%.3f",
+                init_x, init_y, init_z);
+
+    // 检查参数数组大小是否有效
+    if (kf_param_x_.size() >= 2 && kf_param_y_.size() >= 2 && kf_param_z_.size() >= 2)
+    {
+        kf_baselink_x_.KalmanFilterInit(kf_param_x_[0], kf_param_x_[1], init_x, 1);
+        kf_baselink_y_.KalmanFilterInit(kf_param_y_[0], kf_param_y_[1], init_y, 1);
+        kf_baselink_z_.KalmanFilterInit(kf_param_z_[0], kf_param_z_[1], init_z, 1);
+        RCLCPP_INFO(this->get_logger(), "Kalman filters initialized: x[%.6f,%.6f], y[%.6f,%.6f], z[%.6f,%.6f]",
+                    kf_param_x_[0], kf_param_x_[1], kf_param_y_[0], kf_param_y_[1],
+                    kf_param_z_[0], kf_param_z_[1]);
+    }
+    else
+    {
+        RCLCPP_ERROR(this->get_logger(), "Invalid Kalman filter parameters! x_size=%zu, y_size=%zu, z_size=%zu",
+                     kf_param_x_.size(), kf_param_y_.size(), kf_param_z_.size());
+        RCLCPP_ERROR(this->get_logger(), "Kalman filters will NOT be initialized - using default values");
+    }
+
+    kalman_filter_odom2map_.KalmanFilterInit(kalman_processVar2_, kalman_estimatedMeasVar2_, init_z, 1);
 
     loc_initialized_ = true; /// 初始化成功
+
+    RCLCPP_INFO(this->get_logger(), "Localization initialization complete, Kalman filters ready");
 
     double fitness = 0;
     auto coordinate_ori = open3d::geometry::TriangleMesh::CreateCoordinateFrame(2.0);
@@ -711,11 +827,11 @@ void GloabalLocalization::Localization()
 
     OBB_scan->extent_ = Eigen::Vector3d(60, 60, 40);
     OBB_scan->color_ = Eigen::Vector3d(0, 1, 0);
-    ros::Time time_current = timestamp_odom_;
-    ros::Time time_last = time_current - ros::Duration(3.0);
+    rclcpp::Time time_current = timestamp_odom_;
+    rclcpp::Time time_last = time_current - rclcpp::Duration(3, 0);
 
-    ROS_INFO("time_last: %f", time_last.toSec());
-    ROS_INFO("time_current: %f", time_current.toSec());
+    RCLCPP_INFO(this->get_logger(), "time_last: %f", time_last.seconds());
+    RCLCPP_INFO(this->get_logger(), "time_current: %f", time_current.seconds());
     int scan_count = 0;
 
     std::string save_path = "/home/carlos/mount/E/lixin/data/yq_bag/scan_submap/";
@@ -724,13 +840,13 @@ void GloabalLocalization::Localization()
     std::chrono::high_resolution_clock::time_point time_last_loc; /// 上次定位的完成时间点
     std::chrono::high_resolution_clock::time_point time_this_loc; /// 当前定位的开始时间点
     double loc_cost = 0;                                          /// 定位耗时(ms)
-    while (1)
+    while (rclcpp::ok())
     {
 
         lock_timestamp_.lock();
         time_current = timestamp_odom_;
         lock_timestamp_.unlock();
-        auto time_diff_frame = time_current.toSec() - time_last.toSec();
+        auto time_diff_frame = time_current.seconds() - time_last.seconds();
         time_last = time_current;
         if (std::fabs(time_diff_frame) < 1e-6)
         {
@@ -759,7 +875,6 @@ void GloabalLocalization::Localization()
         if (pcd_scan_cur_->IsEmpty())
         {
             lock_scan_.unlock();
-            ROS_INFO("wait for pcd_scan_cur_");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
@@ -798,7 +913,7 @@ void GloabalLocalization::Localization()
 
                 auto submap_e = std::chrono::high_resolution_clock::now();
                 auto submap_cost = std::chrono::duration_cast<std::chrono::microseconds>(submap_e - submap_s).count() / 1000.0;
-                ROS_INFO("submap_cost: %f ms", submap_cost);
+                RCLCPP_INFO(this->get_logger(), "submap_cost: %f ms", submap_cost);
             }
 
             OBB_scan->center_ = mat_baselink2odom_cur.block<3, 1>(0, 3);
@@ -813,7 +928,7 @@ void GloabalLocalization::Localization()
 
             *target = *map_fine_crop;
             open3d::utility::LogInfo("before sample, target size: {}, has normal: {}", target->points_.size(), target->HasNormals() ? "true" : "false");
-            if (target->points_.size() > maxpoints_target_)
+            if (target->points_.size() > static_cast<size_t>(maxpoints_target_))
             {
                 target = target->RandomDownSample(double(maxpoints_target_) / target->points_.size());
             }
@@ -823,7 +938,7 @@ void GloabalLocalization::Localization()
             open3d::utility::LogInfo("source size: {}, maxpoints_source_: {}", source->points_.size(), maxpoints_source_);
             source = source->VoxelDownSample(voxelsize_fine_);
             open3d::utility::LogInfo("source size after voxel downsample: {}", source->points_.size());
-            if (source->points_.size() > maxpoints_source_)
+            if (source->points_.size() > static_cast<size_t>(maxpoints_source_))
             {
                 source = source->RandomDownSample(double(maxpoints_source_) / source->points_.size());
             }
@@ -855,7 +970,7 @@ void GloabalLocalization::Localization()
             auto loc_e = std::chrono::high_resolution_clock::now(); /// 结束定位计时
             time_last_loc = loc_e;
             loc_cost = std::chrono::duration_cast<std::chrono::microseconds>(loc_e - loc_s).count() / 1000.0;
-            ROS_INFO("localization cost: %f ms", loc_cost);
+            RCLCPP_INFO(this->get_logger(), "localization cost: %f ms", loc_cost);
         }
     }
 }
@@ -865,7 +980,7 @@ void GloabalLocalization::StartLoc()
     thread_loc_ = std::thread(&GloabalLocalization::Localization, this);
 }
 
-void GloabalLocalization::CallbackInitialPose(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr &initialpose)
+void GloabalLocalization::CallbackInitialPose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr initialpose)
 {
     std::cout << "mat_odom2map_\n"
               << mat_odom2map_ << std::endl;
@@ -897,6 +1012,7 @@ void GloabalLocalization::CallbackInitialPose(const geometry_msgs::PoseWithCovar
     std::cout << "mat_odom2map_\n"
               << mat_odom2map_ << std::endl;
 }
+
 double GloabalLocalization::ComputeMotionDis(const Eigen::Vector3d &a, const Eigen::Vector3d &b)
 {
     return std::sqrt(std::pow(a.x() - b.x(), 2) + std::pow(a.y() - b.y(), 2) + std::pow(a.z() - b.z(), 2));
@@ -904,22 +1020,14 @@ double GloabalLocalization::ComputeMotionDis(const Eigen::Vector3d &a, const Eig
 
 int main(int argc, char *argv[])
 {
-    ros::init(argc, argv, "global_loc_node");
-    ros::NodeHandle nh;
-    ros::NodeHandle nh_private("~");
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<GloabalLocalization>();
 
-    // global_odom.
-    std::cout << "start spin" << std::endl;
-    // 创建异步对象
-    ros::AsyncSpinner spinner(3);
-    // 开始异步处理
-    spinner.start();
+    // 使用多线程执行器，可以指定线程数
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+    executor.add_node(node);
+    executor.spin();
 
-    GloabalLocalization global_loc(nh, nh_private);
-    global_loc.StartLoc();
-
-    // 等待节点关闭
-    ros::waitForShutdown();
-
+    rclcpp::shutdown();
     return 0;
 }

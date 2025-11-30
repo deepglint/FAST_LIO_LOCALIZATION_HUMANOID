@@ -1,6 +1,0 @@
-<launch>
-	<include file="$(find fast_lio)/launch/mapping_mid360_g1.launch" />
-	<include file="$(find open3d_loc)/launch/open3d_loc_g1.launch" />
-	
-	<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz_map_cur" args="-d $(find open3d_loc)/rviz_cfg/loc_map_cur.rviz" />
-</launch>

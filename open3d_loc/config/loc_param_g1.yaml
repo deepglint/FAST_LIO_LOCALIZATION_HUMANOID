@@ -1,7 +1,9 @@
-# x, y, z, roll, pitch, yaw (单位:度degrees)
-initialpose:  [0, 0, 0, 0, 0, 0]
+global_localization_node:
+  ros__parameters:
+    # x, y, z, roll, pitch, yaw (单位:度degrees)
+    initialpose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-kf_baselink2map:
-  x: [0.001, 0.002]
-  y: [0.001, 0.005]
-  z: [0.00001, 0.04]
+    kf_baselink2map:
+      x: [0.001, 0.002]
+      y: [0.001, 0.005]
+      z: [0.00001, 0.04]
