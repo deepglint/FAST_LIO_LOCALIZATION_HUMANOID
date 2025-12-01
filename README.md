@@ -28,7 +28,7 @@ Left is original, pointcloud is upside down and gravity acceleration measured by
 **Livox MID360** coordinate system on the **Unitree GO2** and the robot dog's physical coordinate system differ only by **6°** on the Y-axis. We can directly choose to use the official driver.
 
 <div align="center">
-<img src="doc/GO2-MID360.gif" width=60% />
+<img src="doc/GO2-MID360.gif" width=70% />
 </div>
 
 ### 0.2 Robust localization based on offline pointcloud map
